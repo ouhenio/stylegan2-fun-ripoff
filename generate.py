@@ -14,7 +14,7 @@ import click
 
 import dnnlib
 from torch_utils.gen_utils import num_range, parse_fps, compress_video, double_slowdown, \
-    make_run_dir, z_to_img, w_to_img, get_w_from_file, create_image_grid, save_config, parse_slowdown, get_w_from_seed, \
+    make_run_dir, z_to_img, w_to_img, get_w_from_file, create_image_grid, save_config, parse_slowdown, get_w_from_seed
     
 
 import scipy

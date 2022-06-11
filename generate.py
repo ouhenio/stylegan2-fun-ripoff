@@ -21,6 +21,7 @@ import scipy
 import numpy as np
 import PIL.Image
 import torch
+import sys
 
 import legacy
 
@@ -205,9 +206,188 @@ def generate_images(
     }
     save_config(ctx=ctx, run_dir=run_dir)
 
+# The following functions are taken from https://github.com/PDillis/stylegan2-fun/blob/420a2819c12dbe3c0c4704a722e292d541f6b006/run_generator.py#L381
+# ----------------------------------------------------------------------------
+
+# Taken and adapted from wikipedia's slerp article
+# https://en.wikipedia.org/wiki/Slerp
+def slerp(t, v0, v1, DOT_THRESHOLD=0.9995):
+    '''
+    Spherical linear interpolation
+    Args:
+        t (float/np.ndarray): Float value between 0.0 and 1.0
+        v0 (np.ndarray): Starting vector
+        v1 (np.ndarray): Final vector
+        DOT_THRESHOLD (float): Threshold for considering the two vectors as
+                               colineal. Not recommended to alter this.
+    Returns:
+        v2 (np.ndarray): Interpolation vector between v0 and v1
+    '''
+    # Copy the vectors to reuse them later
+    v0_copy = np.copy(v0)
+    v1_copy = np.copy(v1)
+    # Normalize the vectors to get the directions and angles
+    v0 = v0 / np.linalg.norm(v0)
+    v1 = v1 / np.linalg.norm(v1)
+    # Dot product with the normalized vectors (can't use np.dot in W)
+    dot = np.sum(v0 * v1)
+    # If absolute value of dot product is almost 1, vectors are ~colineal, so use lerp
+    if np.abs(dot) > DOT_THRESHOLD:
+        return lerp(t, v0_copy, v1_copy)
+    # Calculate initial angle between v0 and v1
+    theta_0 = np.arccos(dot)
+    sin_theta_0 = np.sin(theta_0)
+    # Angle at timestep t
+    theta_t = theta_0 * t
+    sin_theta_t = np.sin(theta_t)
+    # Finish the slerp algorithm
+    s0 = np.sin(theta_0 - theta_t) / sin_theta_0
+    s1 = sin_theta_t / sin_theta_0
+    v2 = s0 * v0_copy + s1 * v1_copy
+    return v2
+
+# Helper function for interpolation
+def interpolate(v0, v1, n_steps, interp_type='spherical', smooth=False):
+    '''
+    Input:
+        v0, v1 (np.ndarray): latent vectors in the spaces Z or W
+        n_steps (int): number of steps to take between both latent vectors
+        interp_type (str): Type of interpolation between latent vectors (linear or spherical)
+        smooth (bool): whether or not to smoothly transition between dlatents
+    Output:
+        vectors (np.ndarray): interpolation of latent vectors, without including v1
+    '''
+    # Get the timesteps
+    t_array = np.linspace(0, 1, num=n_steps, endpoint=False).reshape(-1, 1)
+    if smooth:
+        # Smooth interpolation, constructed following
+        # https://math.stackexchange.com/a/1142755
+        t_array = t_array**2 * (3 - 2 * t_array)
+    # TODO: no need of a for loop; this can be optimized using the fact that they're numpy arrays!
+    vectors = list()
+    for t in t_array:
+        if interp_type == 'linear':
+            v = lerp(t, v0, v1)
+        elif interp_type == 'spherical':
+            v = slerp(t, v0, v1)
+        vectors.append(v)
+    return np.asarray(vectors)
+
+def lerp(t, v0, v1):
+    '''
+    Linear interpolation
+    Args:
+        t (float/np.ndarray): Value between 0.0 and 1.0
+        v0 (np.ndarray): Starting vector
+        v1 (np.ndarray): Final vector
+    Returns:
+        v2 (np.ndarray): Interpolation vector between v0 and v1
+    '''
+    v2 = (1.0 - t) * v0 + t * v1
+    return v2
 
 # ----------------------------------------------------------------------------
 
+@main.command(name='sightseeding-video')
+@click.pass_context
+@click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
+# Synthesis options
+@click.option('--seeds', type=num_range, help='List of random seeds', required=True)
+@click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=1, show_default=True)
+@click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
+# Video Options
+@click.option('--duration-sec', '-sec', type=float, help='Duration length of the video', default=30.0, show_default=True)
+@click.option('--fps', type=parse_fps, help='Video FPS.', default=30, show_default=True)
+# Extra params for results saving
+@click.option('--outdir', type=click.Path(file_okay=False), help='Directory path to save the results', default=os.path.join(os.getcwd(), 'out'), show_default=True, metavar='DIR')
+def sightseeding(network_pkl,                # Path to pretrained model pkl file
+                 seeds,                      # List of random seeds to use
+                 truncation_psi=1.0,         # Truncation trick
+                 seed_sec=5.0,               # Time duration between seeds
+                 interp_type='spherical',    # Type of interpolation: linear or spherical
+                 interp_in_z=False,          # Interpolate in Z (True) or in W (False)
+                 smooth=False,               # Smoothly interpolate between latent vectors
+                 mp4_fps=30,
+                 mp4_codec="libx264",
+                 mp4_bitrate="16M",
+                 minibatch_size=8):
+    # Sanity check before doing any calculations
+    assert interp_type in ['linear', 'spherical'], 'interp_type must be either "linear" or "spherical"'
+    if len(seeds) < 2:
+        print('Please enter more than one seed to interpolate between!')
+        sys.exit(1)
+    print('Loading networks from "%s"...' % network_pkl)
+    _G, _D, Gs = pretrained_networks.load_networks(network_pkl)
+    w_avg = Gs.get_var('dlatent_avg') # [component]
+
+    Gs_syn_kwargs = dnnlib.EasyDict()
+    Gs_syn_kwargs.output_transform = dict(func=tflib.convert_images_to_uint8, nchw_to_nhwc=True)
+    Gs_syn_kwargs.randomize_noise = False
+    Gs_syn_kwargs.minibatch_size = minibatch_size
+
+    # Number of steps to take between each latent vector
+    n_steps = int(np.rint(seed_sec * mp4_fps))
+    # Number of frames in total
+    num_frames = int(n_steps * (len(seeds) - 1))
+    # Duration in seconds
+    duration_sec = num_frames / mp4_fps
+
+    # Generate the random vectors from each seed
+    print('Generating Z vectors...')
+
+    all_z = np.stack([np.random.RandomState(seed).randn(*Gs.input_shape[1:]) for seed in seeds])
+    # If user wants to interpolate in Z
+    if interp_in_z:
+        print(f'Interpolating in Z...(interpolation type: {interp_type})')
+        src_z = np.empty([0] + list(all_z.shape[1:]), dtype=np.float64)
+        for i in range(len(all_z) - 1):
+            # We interpolate between each pair of latents
+            interp = interpolate(all_z[i], all_z[i+1], n_steps, interp_type, smooth)
+            # Append it to our source
+            src_z = np.append(src_z, interp, axis=0)
+        # Convert to W (dlatent vectors)
+        print('Generating W vectors...')
+        src_w = Gs.components.mapping.run(src_z, None) # [minibatch, layer, component]
+    # Otherwise, we interpolate in W
+    else:
+        print(f'Interpolating in W...(interp type: {interp_type})')
+        print('Generating W vectors...')
+        all_w = Gs.components.mapping.run(all_z, None) # [minibatch, layer, component]
+        src_w = np.empty([0] + list(all_w.shape[1:]), dtype=np.float64)
+        for i in range(len(all_w) - 1):
+            # We interpolate between each pair of latents
+            interp = interpolate(all_w[i], all_w[i+1], n_steps, interp_type, smooth)
+            # Append it to our source
+            src_w = np.append(src_w, interp, axis=0)
+    # Do the truncation trick
+    src_w = w_avg + (src_w - w_avg) * truncation_psi
+    # Our grid will be 1x1
+    grid_size = [1,1]
+    # Aux function: Frame generation func for moviepy.
+    def make_frame(t):
+        frame_idx = int(np.clip(np.round(t * mp4_fps), 0, num_frames - 1))
+        latent = src_w[frame_idx]
+	    # Select the pertinent latent w column:
+        w = np.stack([latent]) # [18, 512] -> [1, 18, 512]
+        image = Gs.components.synthesis.run(w, **Gs_syn_kwargs)
+        # Generate the grid for this timestamp:
+        grid = create_image_grid(image, grid_size)
+        # grayscale => RGB
+        if grid.shape[2] == 1:
+            grid = grid.repeat(3, 2)
+        return grid
+    # Generate video using make_frame:
+    print('Generating sightseeding video...')
+    videoclip = moviepy.editor.VideoClip(make_frame, duration=duration_sec)
+    name = '-'
+    name = name.join(map(str, seeds))
+    mp4 = "{}-sighseeding.mp4".format(name)
+    videoclip.write_videofile(dnnlib.make_run_dir_path(mp4),
+                              fps=mp4_fps,
+                              codec=mp4_codec,
+                              bitrate=mp4_bitrate)
+
+# ----------------------------------------------------------------------------
 
 @main.command(name='random-video')
 @click.pass_context

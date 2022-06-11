@@ -15,7 +15,7 @@ import click
 import dnnlib
 from torch_utils.gen_utils import num_range, parse_fps, compress_video, double_slowdown, \
     make_run_dir, z_to_img, w_to_img, get_w_from_file, create_image_grid, save_config, parse_slowdown, get_w_from_seed, \
-    parse_new_center
+    
 
 import scipy
 import numpy as np
@@ -52,7 +52,7 @@ def main():
 @click.option('--class', 'class_idx', type=int, help='Class label (unconditional if not specified)')
 @click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
 @click.option('--projected-w', help='Projection result file; can be either .npy or .npz files', type=click.Path(exists=True, dir_okay=False), metavar='FILE')
-@click.option('--new-center', type=parse_new_center, help='New center for the W latent space; a seed (int) or a path to a projected dlatent (.npy/.npz)', default=None)
+@click.option('--new-center', help='New center for the W latent space; a seed (int) or a path to a projected dlatent (.npy/.npz)', default=None)
 # Grid options
 @click.option('--save-grid', help='Use flag to save image grid', is_flag=True, show_default=True)
 @click.option('--grid-width', '-gw', type=click.IntRange(min=1), help='Grid width (number of columns)', default=None)
@@ -215,7 +215,7 @@ def generate_images(
 # Synthesis options
 @click.option('--seeds', type=num_range, help='List of random seeds', required=True)
 @click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=1, show_default=True)
-@click.option('--new-center', type=parse_new_center, help='New center for the W latent space; a seed (int) or a path to a projected dlatent (.npy/.npz)', default=None)
+@click.option('--new-center', help='New center for the W latent space; a seed (int) or a path to a projected dlatent (.npy/.npz)', default=None)
 @click.option('--class', 'class_idx', type=int, help='Class label (unconditional if not specified)')
 @click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
 # Video options
